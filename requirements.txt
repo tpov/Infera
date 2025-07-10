@@ -1,0 +1,5 @@
+sentence-transformers
+torch
+numpy
+neo4j
+nltk
