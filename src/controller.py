@@ -1,323 +1,266 @@
-import re
-from typing import Dict, Any, Optional
+import json
+import os
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForTokenClassification
+import numpy as np
+from typing import List, Dict, Any, Optional # Добавлены Optional, List, Dict, Any
 
-# Предполагается, что эти классы находятся в тех же src директориях
-# и могут быть импортированы, если controller.py запускается из корневой директории проекта
-# или если src добавлена в PYTHONPATH.
-# Для прямого запуска controller.py (if __name__ == '__main__') может потребоваться
-# добавить src в sys.path, как показано в блоке if __name__ == '__main__'
-try:
-    from embedding_generator import EmbeddingGenerator
-    from state_manager import StateManager
-except ImportError:
-    # Это нужно, если мы запускаем controller.py напрямую для тестов,
-    # и он не может найти модули в src/.
-    # При запуске из main.py, который в корне, импорты должны работать нормально.
-    if __name__ == '__main__':
-        import sys
-        import os
-        # Добавляем родительскую директорию (корень проекта), чтобы найти src
-        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from src.embedding_generator import EmbeddingGenerator
-        from src.state_manager import StateManager
-    else:
-        raise
+# Пути к сохраненным моделям (должны соответствовать путям в скриптах обучения)
+INTENT_MODEL_PATH = "models/intent_classifier_bert_en"
+SLOT_MODEL_PATH = "models/slot_filler_bert_en"
+TOKENIZER_NAME = "bert-base-uncased"
 
+# StateManager больше не импортируется и не используется в NLUController
+# try:
+#     from state_manager import StateManager
+# except ImportError:
+#     # ... (старый код импорта для __main__)
 
-class Controller:
+class NLUController:
     """
-    Класс "Контроллер" для обработки предложений, извлечения информации
-    и обновления состояния через StateManager.
+    Контроллер для NLU: понимание намерений и извлечение слотов/сущностей из текста.
+    Возвращает структурированный JSON, соответствующий `target_structured_output` из генератора данных.
     """
-    def __init__(self, embedding_generator: EmbeddingGenerator, state_manager: StateManager):
-        """
-        Инициализирует Контроллер.
+    def __init__(self, state_manager: Optional[Any] = None, device=None): # state_manager теперь опционален и не используется
+        self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"NLUController using device: {self.device}")
 
-        Args:
-            embedding_generator (EmbeddingGenerator): Экземпляр генератора эмбеддингов.
-            state_manager (StateManager): Экземпляр менеджера состояния.
-        """
-        self.embedding_generator = embedding_generator
-        self.state_manager = state_manager
-        print("Controller initialized.")
+        self.tokenizer = None
+        self.intent_model = None
+        self.slot_model = None
+        self.intent_id_to_label = None # type: Optional[Dict[str, str]]
+        self.slot_id_to_label = None   # type: Optional[Dict[str, str]]
 
-    def _extract_info_simple(self, sentence: str) -> Optional[Dict[str, Any]]:
-        """
-        Очень упрощенное извлечение информации на основе ключевых слов/регулярных выражений.
-        Это временная заглушка.
-        Примеры паттернов:
-        - "В [место] [число] [объект]" -> add_entity, name, count, location
-        - "Добавили [число] [объект]" -> update_entity_count (add)
-        - "Убрали [число] [объект]" -> update_entity_count (subtract)
-        - "Где [объект]?" -> query_location
-        - "Сколько [объект]?" -> query_count
-        """
-        sentence_lower = sentence.lower()
-
-        # Паттерн: "В X Y Z" (В комнате 5 яблок)
-        match_place_count_object = re.search(r"в (.+) (\d+) (.+)", sentence_lower)
-        if match_place_count_object:
-            location, count, entity_name = match_place_count_object.groups()
-            # Убираем возможные знаки препинания в конце имени сущности
-            entity_name = re.sub(r"[.,!?]$", "", entity_name).strip()
-            # Удаляем возможные предлоги или артикли перед названием места, если они попали
-            location = location.replace("на ", "").replace("под ", "").strip()
-            return {
-                "action": "add_entity_at_location",
-                "entity_name": entity_name,
-                "count": int(count),
-                "location": location
-            }
-
-        # Паттерн: "Добавили X Y" (Добавили 3 яблока)
-        match_add_count_object = re.search(r"(добавь|добавили|положили) (\d+) (.+)", sentence_lower)
-        if match_add_count_object:
-            _, count, entity_name = match_add_count_object.groups()
-            entity_name = re.sub(r"[.,!?]$", "", entity_name).strip()
-            return {
-                "action": "update_entity_count",
-                "entity_name": entity_name,
-                "change_count": int(count) # Положительное число для добавления
-            }
-
-        # Паттерн: "Убрали X Y" (Убрали 2 яблока)
-        match_remove_count_object = re.search(r"(убери|убрали|взяли) (\d+) (.+)", sentence_lower)
-        if match_remove_count_object:
-            _, count, entity_name = match_remove_count_object.groups()
-            entity_name = re.sub(r"[.,!?]$", "", entity_name).strip()
-            return {
-                "action": "update_entity_count",
-                "entity_name": entity_name,
-                "change_count": -int(count) # Отрицательное число для вычитания
-            }
-
-        # Паттерн: "Где X?"
-        match_where_is_object = re.search(r"где (.+)\?", sentence_lower)
-        if match_where_is_object:
-            entity_name = match_where_is_object.group(1).strip()
-            entity_name = re.sub(r"[.,!?]$", "", entity_name).strip()
-            return {"action": "query_location", "entity_name": entity_name}
-
-        # Паттерн: "Сколько X?"
-        match_how_many_object = re.search(r"сколько (.+)\?", sentence_lower)
-        if match_how_many_object:
-            entity_name = match_how_many_object.group(1).strip()
-            # Убираем возможные знаки препинания в конце имени сущности
-            entity_name = re.sub(r"[.,!?]$", "", entity_name).strip()
-            # Для простоты не будем агрессивно менять окончания, положимся на точное совпадение
-            # или на то, что пользователь использует ту же форму, что и при создании
-            return {"action": "query_count", "entity_name": entity_name}
-
-        # --- Первые шаги к "думанию" и обработке неполных команд ---
-
-        # Паттерн: "Положи X" (но не сказано куда)
-        # Должен идти после более специфичных паттернов типа "положили X Y" (где Y - количество)
-        match_put_object_no_location = re.search(r"^(положи|клади)\s+(.+)$", sentence_lower)
-        if match_put_object_no_location:
-            entity_name = match_put_object_no_location.group(2).strip()
-            entity_name = re.sub(r"[.,!?]$", "", entity_name).strip()
-            return {
-                "action": "clarification_needed",
-                "entity_name": entity_name,
-                "missing_info": "location_for_put",
-                "original_intent": "put_entity"
-            }
-
-        # Паттерн: "Возьми X" / "Убери X" (без указания количества, подразумевается 1)
-        match_take_object_no_count = re.search(r"^(возьми|забери|убери)\s+(.+)$", sentence_lower)
-        if match_take_object_no_count:
-            entity_name = match_take_object_no_count.group(2).strip()
-            entity_name = re.sub(r"[.,!?]$", "", entity_name).strip()
-
-            entity_data = self.state_manager.get_entity(entity_name)
-            if entity_data:
-                # Если такой объект есть, предполагаем, что нужно убрать/взять 1
-                return {
-                    "action": "update_entity_count",
-                    "entity_name": entity_name,
-                    "change_count": -1
-                }
-            else: # Объекта нет
-                return {
-                    "action": "clarification_needed",
-                    "entity_name": entity_name,
-                    "missing_info": "entity_not_found_for_take",
-                    "original_intent": "take_entity"
-                }
-
-        return None # Не удалось распознать команду
-
-    def process_sentence(self, sentence: str) -> str:
-        """
-        Обрабатывает одно предложение.
-
-        Args:
-            sentence (str): Входное предложение.
-
-        Returns:
-            str: Ответ системы или статус обработки.
-        """
-        print(f"\nController processing: '{sentence}'")
-        # Шаг 1: Получение эмбеддинга (пока не используется в простой логике, но задел на будущее)
-        # embedding = self.embedding_generator.get_embeddings(sentence)
-        # if embedding is None:
-        #     return "Ошибка: не удалось получить эмбеддинг для предложения."
-        # print(f"Embedding shape for sentence: {embedding.shape}")
-
-        # Шаг 2: Извлечение информации (упрощенная версия)
-        extracted_info = self._extract_info_simple(sentence)
-
-        if not extracted_info:
-            return f"Не удалось распознать команду в предложении: '{sentence}'"
-
-        action = extracted_info.get("action")
-        entity_name = extracted_info.get("entity_name")
-        response = f"Действие: {action}, Сущность: {entity_name}."
-
-        # Шаг 3: Обновление состояния или выполнение запроса
-        if action == "add_entity_at_location":
-            attrs = {"count": extracted_info["count"], "location": extracted_info["location"]}
-            self.state_manager.add_or_update_entity(entity_name, attrs)
-            response = f"Добавлено/обновлено: {entity_name} (количество: {attrs['count']}) в локации '{attrs['location']}'."
-
-        elif action == "update_entity_count":
-            current_entity = self.state_manager.get_entity(entity_name)
-            change = extracted_info["change_count"]
-            if current_entity:
-                current_count = current_entity.get("count", 0)
-                new_count = current_count + change
-                if new_count < 0:
-                    response = f"Невозможно выполнить: у {entity_name} всего {current_count}, нельзя убрать {abs(change)}."
-                else:
-                    self.state_manager.add_or_update_entity(entity_name, {"count": new_count})
-                    if change > 0:
-                        response = f"К {entity_name} добавлено {change}. Теперь их {new_count}."
-                    else:
-                        response = f"У {entity_name} убрано {abs(change)}. Теперь их {new_count}."
-            else:
-                if change > 0: # Если добавляем несуществующую сущность
-                    self.state_manager.add_or_update_entity(entity_name, {"count": change})
-                    response = f"Добавлена новая сущность: {entity_name} (количество: {change})."
-                else: # Пытаемся убрать из несуществующей
-                    response = f"Сущность '{entity_name}' не найдена, невозможно изменить количество."
-
-        elif action == "query_location":
-            entity_data = self.state_manager.get_entity(entity_name)
-            if entity_data and "location" in entity_data:
-                response = f"{entity_name.capitalize()} находится в локации '{entity_data['location']}'."
-            elif entity_data:
-                response = f"Местоположение для '{entity_name}' неизвестно."
-            else:
-                response = f"Сущность '{entity_name}' не найдена."
-
-        elif action == "query_count":
-            entity_data = self.state_manager.get_entity(entity_name)
-            if entity_data and "count" in entity_data:
-                response = f"Количество {entity_name}: {entity_data['count']}."
-            elif entity_data:
-                response = f"Количество для '{entity_name}' неизвестно."
-            else:
-                # Перед тем как сказать "не найдена", попробуем нормализовать запрос как в _extract_info_simple
-                # Это очень грубая попытка, в идеале нужна лемматизация при сохранении и запросе
-                normalized_entity_name = entity_name
-                if normalized_entity_name.endswith("ов") and len(normalized_entity_name) > 2 : normalized_entity_name = normalized_entity_name[:-2]
-                elif normalized_entity_name.endswith("ев") and len(normalized_entity_name) > 2 : normalized_entity_name = normalized_entity_name[:-2]
-                elif normalized_entity_name.endswith("ей") and len(normalized_entity_name) > 2 : normalized_entity_name = normalized_entity_name[:-2]
-                # ... (можно добавить больше правил или использовать лемматизатор)
-                # Попробуем еще раз с нормализованным именем, если оно изменилось
-                if normalized_entity_name != entity_name:
-                    entity_data_normalized = self.state_manager.get_entity(normalized_entity_name)
-                    if entity_data_normalized and "count" in entity_data_normalized:
-                        response = f"Количество {normalized_entity_name}: {entity_data_normalized['count']}."
-                        entity_name = normalized_entity_name # Обновляем для лога
-                    elif entity_data_normalized:
-                        response = f"Количество для '{normalized_entity_name}' неизвестно."
-                        entity_name = normalized_entity_name # Обновляем для лога
-                    else:
-                        response = f"Сущность '{entity_name}' (или '{normalized_entity_name}') не найдена."
-                else:
-                    response = f"Сущность '{entity_name}' не найдена."
-
-        elif action == "clarification_needed":
-            missing = extracted_info.get("missing_info")
-            entity = extracted_info.get("entity_name")
-            # original_intent = extracted_info.get("original_intent") # Пока не используется в ответе
-
-            if missing == "location_for_put":
-                response = f"Куда вы хотите положить '{entity}'?"
-            elif missing == "entity_not_found_for_take":
-                response = f"Я не могу взять '{entity}', так как такой сущности нет."
-            # Добавить другие типы уточнений если будут
-            else:
-                response = f"Мне нужно больше информации для обработки запроса по '{entity}'."
-
+        self._load_models()
+        if self.tokenizer and self.intent_model and self.slot_model:
+            print("NLUController initialized successfully with models.")
         else:
-            response = f"Неизвестное действие: {action}"
+            print("NLUController initialization FAILED: one or more models/tokenizer could not be loaded.")
 
-        print(f"Controller response: {response}")
-        return response
+
+    def _load_models(self):
+        """Загружает обученные модели и токенизатор."""
+        try:
+            # Токенизатор может быть сохранен с любой моделью, грузим из одного места для консистентности
+            # Предпочтительнее грузить из SLOT_MODEL_PATH, если он есть, т.к. он мог быть адаптирован для токенов
+            if os.path.exists(SLOT_MODEL_PATH) and os.path.isdir(SLOT_MODEL_PATH):
+                print(f"Loading tokenizer from: {SLOT_MODEL_PATH}")
+                self.tokenizer = AutoTokenizer.from_pretrained(SLOT_MODEL_PATH)
+            elif os.path.exists(INTENT_MODEL_PATH) and os.path.isdir(INTENT_MODEL_PATH):
+                print(f"Loading tokenizer from: {INTENT_MODEL_PATH}")
+                self.tokenizer = AutoTokenizer.from_pretrained(INTENT_MODEL_PATH)
+            else:
+                print(f"Attempting to load tokenizer by name: {TOKENIZER_NAME}")
+                self.tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
+
+            if os.path.exists(INTENT_MODEL_PATH) and os.path.isdir(INTENT_MODEL_PATH):
+                print(f"Loading intent model from: {INTENT_MODEL_PATH}")
+                self.intent_model = AutoModelForSequenceClassification.from_pretrained(INTENT_MODEL_PATH).to(self.device)
+                self.intent_model.eval()
+                intent_map_path = os.path.join(INTENT_MODEL_PATH, "intent_label_map.json")
+                if os.path.exists(intent_map_path):
+                    with open(intent_map_path, 'r', encoding='utf-8') as f:
+                        self.intent_id_to_label = json.load(f).get("id_to_intent") # Убедимся, что берем правильную карту
+                else: print(f"Warning: Intent label map not found at {intent_map_path}")
+            else: print(f"Warning: Intent model not found at {INTENT_MODEL_PATH}.")
+
+            if os.path.exists(SLOT_MODEL_PATH) and os.path.isdir(SLOT_MODEL_PATH):
+                print(f"Loading slot filler model from: {SLOT_MODEL_PATH}")
+                self.slot_model = AutoModelForTokenClassification.from_pretrained(SLOT_MODEL_PATH).to(self.device)
+                self.slot_model.eval()
+                slot_map_path = os.path.join(SLOT_MODEL_PATH, "slot_label_map.json")
+                if os.path.exists(slot_map_path):
+                    with open(slot_map_path, 'r', encoding='utf-8') as f:
+                        self.slot_id_to_label = json.load(f).get("id_to_label") # Убедимся, что берем правильную карту
+                else: print(f"Warning: Slot label map not found at {slot_map_path}")
+            else: print(f"Warning: Slot model not found at {SLOT_MODEL_PATH}.")
+
+        except Exception as e:
+            print(f"Error loading NLU models/tokenizer: {e}")
+            # Устанавливаем в None, чтобы проверки в predict_nlu сработали
+            self.tokenizer = None
+            self.intent_model = None
+            self.slot_model = None
+
+
+    def _decode_iob_tags(self, tokens: List[str], iob_ids: List[int],
+                         attention_mask: List[int], token_offsets: List[Tuple[int,int]],
+                         original_text: str) -> List[Dict[str, Any]]:
+        if not self.slot_id_to_label or not self.tokenizer: return []
+
+        slots = []
+        current_slot_tokens_indices = []
+        current_slot_type = None
+
+        for i in range(len(iob_ids)):
+            if attention_mask[i] == 0: continue # PAD
+            # Игнорируем CLS/SEP для формирования значений слотов, но не для логики B-/I-
+            # is_special_token = tokens[i] in [self.tokenizer.cls_token, self.tokenizer.sep_token, self.tokenizer.pad_token]
+
+            label_id_str = str(iob_ids[i])
+            label_str = self.slot_id_to_label.get(label_id_str, "O")
+
+            if label_str.startswith("B-"):
+                if current_slot_type and current_slot_tokens_indices: # Закрываем предыдущий слот
+                    start_char = token_offsets[current_slot_tokens_indices[0]][0]
+                    end_char = token_offsets[current_slot_tokens_indices[-1]][1]
+                    slot_value = original_text[start_char:end_char]
+                    slots.append({"type": current_slot_type, "value": slot_value.strip(), "char_spans": (start_char, end_char)})
+
+                current_slot_tokens_indices = [i]
+                current_slot_type = label_str[2:]
+            elif label_str.startswith("I-"):
+                if current_slot_type == label_str[2:] and current_slot_tokens_indices: # Продолжение текущего
+                    current_slot_tokens_indices.append(i)
+                else: # I-метка другого типа или без B- -> ошибка, закрываем старый, этот O
+                    if current_slot_type and current_slot_tokens_indices:
+                        start_char = token_offsets[current_slot_tokens_indices[0]][0]
+                        end_char = token_offsets[current_slot_tokens_indices[-1]][1]
+                        slot_value = original_text[start_char:end_char]
+                        slots.append({"type": current_slot_type, "value": slot_value.strip(), "char_spans": (start_char, end_char)})
+                    current_slot_tokens_indices = []
+                    current_slot_type = None
+            else: # "O"
+                if current_slot_type and current_slot_tokens_indices: # Закрываем предыдущий слот
+                    start_char = token_offsets[current_slot_tokens_indices[0]][0]
+                    end_char = token_offsets[current_slot_tokens_indices[-1]][1]
+                    slot_value = original_text[start_char:end_char]
+                    slots.append({"type": current_slot_type, "value": slot_value.strip(), "char_spans": (start_char, end_char)})
+                current_slot_tokens_indices = []
+                current_slot_type = None
+
+        if current_slot_type and current_slot_tokens_indices: # Закрываем последний открытый слот
+            start_char = token_offsets[current_slot_tokens_indices[0]][0]
+            end_char = token_offsets[current_slot_tokens_indices[-1]][1]
+            slot_value = original_text[start_char:end_char]
+            slots.append({"type": current_slot_type, "value": slot_value.strip(), "char_spans": (start_char, end_char)})
+        return slots
+
+    def _build_structured_output(self, intent_label: str, extracted_slots: List[Dict[str, Any]], source_text: str) -> Dict[str, Any]:
+        """
+        Собирает сложный структурированный JSON из предсказанного намерения и извлеченных слотов.
+        Эта логика должна быть зеркальным отражением `target_json_builder` из `training_data_generator.py`.
+        """
+        output = {"overall_intent": intent_label, "source_text": source_text}
+        # Вспомогательная функция для поиска слотов
+        def get_slot_val(slot_type: str, default: Any = None) -> Any:
+            return next((s["value"] for s in extracted_slots if s["type"] == slot_type), default)
+        def get_all_slots(slot_type: str) -> List[Dict[str,Any]]:
+            return [s for s in extracted_slots if s["type"] == slot_type]
+
+        # TODO: Реализовать логику сборки для КАЖДОГО интента, который предполагает сложную структуру.
+        # Это будет большая работа, требующая точного соответствия target_json_builder.
+        # Ниже приведены очень УПРОЩЕННЫЕ примеры, которые нужно будет значительно доработать.
+
+        if intent_label == "ADD_ENTITY_WITH_DETAILS":
+            output["action_details"] = {"verb": "add"}
+            output["entities_involved"] = [{
+                "name": get_slot_val("ENTITY_NAME_PLURAL"), # Генератор использует ENTITY_NAME_PLURAL
+                "attributes": {
+                    "count": get_slot_val("COUNT"),
+                    "location": get_slot_val("LOCATION"),
+                    "color": get_slot_val("ATTRIBUTE_VALUE")
+                }
+            }]
+        elif intent_label == "QUERY_COUNT":
+            output["query_type"] = "GET_ATTRIBUTE"
+            output["entity_name"] = get_slot_val("ENTITY_NAME_PLURAL")
+            output["attribute_to_query"] = "count"
+            loc = get_slot_val("LOCATION")
+            if loc: output["conditions"] = [{"location": loc}]
+
+        elif intent_label == "PROCESS_LOGICAL_STATEMENT_IMPLICATION":
+            output["statement_type"] = "CONDITIONAL_RULE"
+            output["condition"] = {"raw_text": get_slot_val("CONDITION_PHRASE")}
+            output["consequence"] = {"raw_text": get_slot_val("CONSEQUENCE_PHRASE")}
+            # Если бы NLU извлекал еще и ASSERTED_CONDITION_PHRASE для факта:
+            # asserted = get_slot_val("ASSERTED_CONDITION_PHRASE")
+            # if asserted: output["asserted_fact_text"] = asserted
+
+        elif intent_label == "SIMULATE_SCENARIO_CHANGE":
+            # Эта логика должна быть намного сложнее, чтобы правильно сгруппировать
+            # initial_entities и entities_to_add из плоского списка extracted_slots.
+            # Например, нужно будет смотреть на порядок слотов, их типы (ENTITY_A, ENTITY_B, ENTITY_C),
+            # чтобы правильно сопоставить их с initial_entities и entities_to_add.
+            # Пока что это очень грубая заглушка.
+            output["scenario_context"] = {
+                "initial_entities": [{"name": get_slot_val("ENTITY_C_PLURAL"), "count": get_slot_val("COUNT_C")}],
+                "actions": [{"verb": "add", "entities_to_add": [
+                    {"name": get_slot_val("ENTITY_A_PLURAL"), "count": get_slot_val("COUNT_A")},
+                    {"name": get_slot_val("ENTITY_B_SINGULAR") or get_slot_val("ENTITY_B_PLURAL"),
+                     "count": get_slot_val("COUNT_B", "1")} # По умолчанию 1, если не извлечен
+                ]}]
+            }
+            output["query_type"] = "PREDICT_OUTCOME"
+        else:
+            # Для других интентов, если нет специальной структуры, можно просто вернуть "сырые" слоты
+            output["extracted_slots_flat"] = extracted_slots
+            # Но лучше иметь явную структуру для каждого интента, как в target_json_builder
+
+        # print(f"DEBUG _build_structured_output: {json.dumps(output, indent=2)}")
+        return output
+
+    def predict_nlu(self, text: str) -> Dict[str, Any]:
+        """ Выполняет NLU: определяет намерение и извлекает слоты, затем строит сложный JSON. """
+        if not self.tokenizer or not self.intent_model or not self.slot_model or \
+           not self.intent_id_to_label or not self.slot_id_to_label:
+            return {"overall_intent": "NLU_ERROR", "source_text": text, "error": "NLU models, tokenizer, or label maps not loaded."}
+
+        inputs = self.tokenizer.encode_plus(
+            text, add_special_tokens=True, max_length=128, # TODO: Использовать константу MAX_SEQ_LENGTH
+            padding='max_length', truncation=True, return_attention_mask=True,
+            return_tensors='pt', return_offsets_mapping=True # Нужны offset_mapping для _decode_iob_tags
+        )
+        input_ids = inputs['input_ids'].to(self.device)
+        attention_mask = inputs['attention_mask'].to(self.device)
+        offset_mapping = inputs['offset_mapping'].squeeze().tolist() # Для использования в _decode_iob_tags
+
+        with torch.no_grad():
+            intent_logits = self.intent_model(input_ids, attention_mask=attention_mask).logits
+            slot_logits = self.slot_model(input_ids, attention_mask=attention_mask).logits
+
+        predicted_intent_id = str(torch.argmax(intent_logits, dim=1).item()) # Ключи в карте - строки
+        predicted_intent_label = self.intent_id_to_label.get(predicted_intent_id, "UNKNOWN_INTENT")
+
+        predicted_slot_ids = torch.argmax(slot_logits, dim=2)[0].cpu().tolist()
+
+        tokens = self.tokenizer.convert_ids_to_tokens(input_ids[0].cpu().tolist())
+        attention_mask_list = attention_mask[0].cpu().tolist()
+
+        # Используем original_text для извлечения значений слотов по char_spans
+        extracted_slots_with_spans = self._decode_iob_tags(tokens, predicted_slot_ids, attention_mask_list, offset_mapping, text)
+
+        # Собираем сложный структурированный вывод
+        final_structured_output = self._build_structured_output(predicted_intent_label, extracted_slots_with_spans, text)
+
+        return final_structured_output
+
+    # process_sentence удален, так как NLUController отвечает только за NLU, а не за обработку состояния.
+    # Логический контроллер будет вызывать predict_nlu().
 
 if __name__ == '__main__':
-    print("Initializing components for Controller test...")
-    try:
-        # Убедимся, что src в sys.path для импортов, если запускаем этот файл напрямую
-        if 'src.embedding_generator' not in sys.modules:
-             import os
-             # Добавляем родительскую директорию (корень проекта), чтобы найти src
-             sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-             from src.embedding_generator import EmbeddingGenerator
-             from src.state_manager import StateManager
-
-        emb_gen = EmbeddingGenerator() # Использует модель по умолчанию
-        state_mng = StateManager()
-        controller = Controller(emb_gen, state_mng)
-
-        print("\n--- Testing Controller Processing ---")
-
-        test_sentences = [
-            "В комнате 5 яблок.",
-            "Добавили 3 яблока.",
-            "Сколько яблок?",
-            "Где яблоки?",
-            "Убрали 10 яблок.", # Попытка убрать больше, чем есть
-            "Сколько яблок?",
-            "Убрали 2 яблока.",
-            "Сколько яблок?",
-            "Где груши?", # Запрос о несуществующей сущности
-            "Положили 2 банана.",
-            "Сколько бананов?",
-            "Это непонятное предложение."
-        ]
-
-        for sentence in test_sentences:
-            controller.process_sentence(sentence)
-            # print("Current state:", state_mng.get_current_state()["entities"])
-            print("-" * 30)
-
-        print("\n--- Testing Clarification Logic ---")
-        clarification_sentences = [
-            "Положи яблоко.",
-            "Возьми грушу.", # Груши нет в состоянии
-            "Убери стол." # Стол не является сущностью с количеством
-        ]
-        for sentence in clarification_sentences:
-            controller.process_sentence(sentence)
-            print("-" * 30)
-
-        # Проверим, что после "Возьми яблоко" (если яблоки есть), одно яблоко уберется
-        state_mng.reset_state()
-        controller.process_sentence("В комнате 3 яблока.")
-        print("Состояние до 'Возьми яблоко':", state_mng.get_entity("яблоко"))
-        controller.process_sentence("Возьми яблоко.")
-        print("Состояние после 'Возьми яблоко':", state_mng.get_entity("яблоко"))
-        controller.process_sentence("Сколько яблок?")
-
-
-        print("\nController test finished.")
-
-    except Exception as e:
-        import traceback
-        print(f"An error occurred during the Controller test: {e}")
-        print(traceback.format_exc())
-        print("Ensure EmbeddingGenerator and StateManager can be initialized.")
-        print("If SentenceTransformer model download fails, check internet connection.")
+    print("Initializing components for NLUController test...")
+    if not os.path.exists(INTENT_MODEL_PATH) or not os.path.exists(SLOT_MODEL_PATH):
+        print(f"ERROR: Trained models not found! Ensure '{INTENT_MODEL_PATH}' and '{SLOT_MODEL_PATH}' exist.")
+    else:
+        nlu_controller = NLUController()
+        if nlu_controller.tokenizer and nlu_controller.intent_model and nlu_controller.slot_model:
+            print("\n--- Testing NLUController.predict_nlu() (English) ---")
+            test_sentences = [
+                "hello",
+                "in the kitchen there are 5 red apples",
+                "how many apples",
+                "what happens if you add 3 more elephants and a tiger to two elephants",
+                "if it rains then the ground is wet",
+                "it is raining",
+                "goodbye"
+            ]
+            for sentence in test_sentences:
+                structured_nlu_output = nlu_controller.predict_nlu(sentence)
+                print(f"\n  User: {sentence}")
+                print(f"  NLU Output (Structured JSON):")
+                print(json.dumps(structured_nlu_output, indent=2, ensure_ascii=False))
+                print("-" * 30)
+        else:
+            print("NLUController could not be fully initialized.")
+    print("\nNLUController test finished.")
