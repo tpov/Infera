@@ -1,52 +1,137 @@
-import argparse
 import sys
 import os
-from text_processor import process_text
+import json # Добавлен импорт json для команды "показать состояние"
 
-def main():
-    parser = argparse.ArgumentParser(description="Process a text file to build a graph in Neo4j.")
-    parser.add_argument("input_file", help="Path to the input text file.")
+# Добавляем директорию src в PYTHONPATH, чтобы можно было импортировать модули из нее
+# Это необходимо, так как main.py находится в корне, а модули в src/
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
 
-    # Дополнительные аргументы можно добавить здесь, если потребуется
-    # Например, URI Neo4j, пользователя, пароль, если не хотим их жестко кодировать
-    # parser.add_argument("--neo4j_uri", default="neo4j+s://your_aura_uri.databases.neo4j.io", help="Neo4j URI")
-    # parser.add_argument("--neo4j_user", default="neo4j", help="Neo4j Username")
-    # parser.add_argument("--neo4j_password", help="Neo4j Password (will prompt if not provided and needed)")
+try:
+    from embedding_generator import EmbeddingGenerator
+    from state_manager import StateManager
+    from controller import Controller
+except ImportError as e:
+    print(f"Ошибка импорта: {e}")
+    print("Убедитесь, что скрипт main.py находится в корневой директории проекта,")
+    print("а модули embedding_generator, state_manager, controller находятся в директории src/.")
+    print("Также проверьте, что все зависимости установлены (pip install -r requirements.txt).")
+    sys.exit(1)
 
-    if len(sys.argv) == 1:
-        # Если аргументы не переданы, печатаем справку и выходим
-        # Это полезно, если пользователь просто запускает main.py без параметров
-        parser.print_help(sys.stderr)
-        sys.exit(1)
+def print_welcome_message():
+    """Печатает приветственное сообщение и инструкции."""
+    print("\nДобро пожаловать в прототип интеллектуального ассистента!")
+    print("Система готова к обработке ваших предложений.")
+    print("Примеры команд, которые система может попытаться понять:")
+    print("  - 'В комнате 5 яблок.'")
+    print("  - 'Добавили 3 яблока.'")
+    print("  - 'Убрали 2 яблока.'")
+    print("  - 'Сколько яблок?'")
+    print("  - 'Где яблоки?'")
+    print("  - 'сохранить состояние <имя_файла>' (например, 'сохранить состояние my_state') - .json добавится автоматически")
+    print("  - 'загрузить состояние <имя_файла>' (например, 'загрузить состояние my_state') - .json добавится автоматически")
+    print("  - 'показать состояние'")
+    print("  - 'сбросить состояние'")
+    print("Для выхода введите 'выход', 'exit' или 'quit'.\n")
 
-    args = parser.parse_args()
-
-    input_filepath = args.input_file
-
-    if not os.path.exists(input_filepath):
-        print(f"Error: Input file '{input_filepath}' not found.")
-        sys.exit(1)
-
-    if not os.path.isfile(input_filepath):
-        print(f"Error: '{input_filepath}' is not a file.")
-        sys.exit(1)
-
+def main_loop():
+    """Основной цикл программы для взаимодействия с пользователем."""
     try:
-        print(f"Starting processing for {input_filepath}...")
-        process_text(input_filepath)
-        print(f"Successfully processed {input_filepath}.")
-    except ValueError as ve: # Ошибки, которые мы сами генерируем (например, формат priority)
-        print(f"ValueError: {ve}")
-        sys.exit(1)
-    except ConnectionError as ce: # Проблемы с подключением к Neo4j
-        print(f"ConnectionError: Could not connect to the database. {ce}")
-        print("Please ensure Neo4j is running and connection details are correct.")
-        sys.exit(1)
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        print("Инициализация компонентов системы...")
+        embedding_gen = EmbeddingGenerator()
+        if not hasattr(embedding_gen, 'model') or embedding_gen.model is None:
+            print("Критическая ошибка: Не удалось загрузить модель эмбеддингов.")
+            print("Проверьте интернет-соединение (для первой загрузки модели) и имя модели.")
+            print("Работа программы будет прекращена.")
+            return
 
-if __name__ == '__main__':
-    main()
+        state_mng = StateManager()
+        contr = Controller(embedding_gen, state_mng)
+        print("Компоненты успешно инициализированы.")
+    except Exception as e:
+        print(f"Произошла ошибка при инициализации компонентов: {e}")
+        import traceback
+        print(traceback.format_exc())
+        print("Работа программы будет прекращена.")
+        return
+
+    print_welcome_message()
+
+    # Создаем директорию data, если ее нет, для сохранения состояний
+    data_dir = "data"
+    if not os.path.exists(data_dir):
+        try:
+            os.makedirs(data_dir, exist_ok=True)
+        except OSError as e:
+            print(f"Не удалось создать директорию {data_dir}: {e}. Сохранение/загрузка состояния может не работать.")
+
+
+    while True:
+        try:
+            user_input = input("Вы: ").strip()
+        except KeyboardInterrupt:
+            print("\nПолучен сигнал прерывания. Завершение работы...")
+            break
+        except EOFError: # Обработка Ctrl+D
+            print("\nДостигнут конец ввода. Завершение работы...")
+            break
+
+        if not user_input:
+            continue
+
+        if user_input.lower() in ["выход", "exit", "quit"]:
+            print("Завершение работы. До свидания!")
+            break
+
+        elif user_input.lower().startswith("сохранить состояние "):
+            parts = user_input.split(maxsplit=2)
+            if len(parts) == 3:
+                filename = parts[2].strip()
+                if not filename:
+                    print("Система: Имя файла для сохранения не может быть пустым.")
+                    continue
+                if not filename.endswith(".json"):
+                    filename += ".json"
+                filepath = os.path.join(data_dir, filename)
+
+                if state_mng.save_state_to_file(filepath):
+                    print(f"Система: Состояние сохранено в {filepath}")
+                else:
+                    print(f"Система: Не удалось сохранить состояние в {filepath}")
+            else:
+                print("Система: Неверный формат команды. Используйте: 'сохранить состояние <имя_файла>'")
+            continue
+
+        elif user_input.lower().startswith("загрузить состояние "):
+            parts = user_input.split(maxsplit=2)
+            if len(parts) == 3:
+                filename = parts[2].strip()
+                if not filename:
+                    print("Система: Имя файла для загрузки не может быть пустым.")
+                    continue
+                if not filename.endswith(".json"):
+                    filename += ".json"
+                filepath = os.path.join(data_dir, filename)
+                if state_mng.load_state_from_file(filepath):
+                    print(f"Система: Состояние загружено из {filepath}")
+                else:
+                    print(f"Система: Не удалось загрузить состояние из {filepath}.")
+            else:
+                print("Система: Неверный формат команды. Используйте: 'загрузить состояние <имя_файла>'")
+            continue
+
+        elif user_input.lower() == "показать состояние":
+            current_state = state_mng.get_current_state()
+            print("Система: Текущее состояние:")
+            print(json.dumps(current_state, ensure_ascii=False, indent=4))
+            continue
+
+        elif user_input.lower() == "сбросить состояние":
+            state_mng.reset_state()
+            print("Система: Состояние было сброшено.")
+            continue
+
+        response = contr.process_sentence(user_input)
+        print(f"Система: {response}")
+
+if __name__ == "__main__":
+    main_loop()
