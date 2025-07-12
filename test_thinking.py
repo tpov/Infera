@@ -6,8 +6,8 @@ def test_thinking_mode():
     """
     print("Тестирование режима 'думания'...")
     
-    # Создаем пайплайн с уменьшенным количеством циклов для теста
-    pipeline = ThinkingPipeline(max_thinking_cycles=3)
+    # Создаем пайплайн с увеличенным количеством циклов для теста
+    pipeline = ThinkingPipeline(max_thinking_cycles=15)  # Увеличиваем для теста
     
     # Тестовый запрос
     test_query = "Создай робота с возрастом -5"

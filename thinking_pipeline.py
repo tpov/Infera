@@ -138,19 +138,26 @@ class ThinkingPipeline:
     
     def _generate_commands_from_vector(self, vector: torch.Tensor) -> str:
         """
-        Простая логика генерации команд из вектора
+        Генерация команд из вектора (требует обученную нейросеть)
         """
-        vector_norm = torch.norm(vector).item()
-        
-        if vector_norm > 0.5:
-            return "create robot age 25 cost 100"
-        else:
-            return "create sensor name test_sensor"
+        # TODO: Здесь должна быть обученная нейросеть для генерации команд
+        # Пока возвращаем пустую команду, чтобы не создавать объекты без обучения
+        print("⚠️  ВНИМАНИЕ: Нейросеть для генерации команд не обучена!")
+        print("   Для работы системы нужно создать и обучить LSTM/Transformer")
+        print("   для преобразования вектора в команды контроллера.")
+        return ""  # Пустая команда - ничего не создаем
     
     def _should_stop_thinking(self, cycle_result: Dict[str, Any]) -> bool:
         """
         Определяет, нужно ли остановить "думание"
         """
+        current_cycle = cycle_result["cycle"]
+        
+        # Минимум 10 циклов "думания" для любой задачи
+        if current_cycle < 10:
+            return False
+        
+        # После 10 циклов проверяем условия остановки
         # Останавливаем, если контроллер успешно выполнил команды
         if cycle_result["controller_result"]["success"]:
             return True
@@ -167,28 +174,9 @@ class ThinkingPipeline:
     
     def _prepare_next_cycle_input(self, cycle_result: Dict[str, Any]) -> str:
         """
-        Подготавливает вход для следующего цикла
+        Подготавливает вход для следующего цикла: теперь это только выход финальной генеративной сети
         """
-        original_query = cycle_result["input"]
-        response = cycle_result["response"]
-        controller_result = cycle_result["controller_result"]
-        
-        # Объединяем исходный запрос с результатами
-        next_input = f"{original_query} | Результат: {response}"
-        
-        # Добавляем информацию о созданных объектах
-        if controller_result["created_objects"] > 0:
-            next_input += f" | Создано объектов: {controller_result['created_objects']}"
-        
-        # Добавляем информацию о противоречиях
-        if controller_result["contradictions"]:
-            next_input += f" | Противоречия: {', '.join(controller_result['contradictions'])}"
-        
-        # Добавляем информацию о предупреждениях
-        if controller_result["warnings"]:
-            next_input += f" | Предупреждения: {', '.join(controller_result['warnings'])}"
-        
-        return next_input
+        return cycle_result["response"]
     
     def get_system_status(self) -> Dict[str, Any]:
         """
