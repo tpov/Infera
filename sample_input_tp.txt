@@ -1,6 +1,0 @@
-priority: 0.25
-This is the first paragraph. It has two sentences.
-
-This is the second paragraph. It is also short. A third sentence here.
-
-A final paragraph with a repeated word. This paragraph is the end.
