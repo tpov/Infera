@@ -1,5 +1,6 @@
 import nltk
 import re
+import numpy as np
 from vectorizer import get_vector, cosine_similarity
 import graph_db
 from graph_db import execute_batch # Для пакетных операций
@@ -177,7 +178,7 @@ def process_text(filepath: str):
                         # Сходство высокое, обновляем вектор и приоритет слова
                         # print(f"    Word '{word_text}' exists. High similarity ({similarity:.2f}). Updating.")
                         # Формируем операцию обновления для батча
-                        batch_ops.append((
+                        batch_operations.append((
                             "MATCH (w:Word {text: $text}) "
                             "SET w.vector = $new_vector, w.priority = $new_priority, w.usage_count = w.usage_count + 1",
                             {
@@ -190,14 +191,14 @@ def process_text(filepath: str):
                         # Сходство низкое, не обновляем вектор, но увеличиваем счетчик использования
                         # И связь все равно создается.
                         # print(f"    Word '{word_text}' exists. Low similarity ({similarity:.2f}). Incrementing usage count only.")
-                        batch_ops.append((
+                        batch_operations.append((
                             "MATCH (w:Word {text: $text}) SET w.usage_count = w.usage_count + 1",
                             {"text": word_text}
                         ))
                 else:
                     # Слова нет, создаем новый узел
                     # print(f"    Word '{word_text}' is new. Creating node.")
-                    batch_ops.append((
+                    batch_operations.append((
                         "CREATE (w:Word {text: $text, vector: $vector, priority: $priority, usage_count: 1})",
                         {"text": word_text, "vector": paragraph_vector, "priority": paragraph_priority_for_new_words}
                     ))
@@ -205,7 +206,7 @@ def process_text(filepath: str):
                 # Добавляем связь с предыдущим словом, если оно есть
                 if previous_word_text:
                     # print(f"      Adding relationship: '{previous_word_text}' -> '{word_text}'")
-                    batch_ops.append((
+                    batch_operations.append((
                         "MATCH (w1:Word {text: $text1}), (w2:Word {text: $text2}) "
                         "MERGE (w1)-[r:PRECEDES {sentence_id: $sentence_id}]->(w2)",
                         {"text1": previous_word_text, "text2": word_text, "sentence_id": sentence_id}
