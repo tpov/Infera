@@ -16,6 +16,12 @@ class LogicalController:
                 return node_id
         return None
 
+    def get_node_by_id(self, node_id: str):
+        """Get node data by node ID"""
+        if node_id in self.world_graph.nodes:
+            return self.world_graph.nodes[node_id].get('data')
+        return None
+
     def _evaluate_field(self, node: Union[ObjectNode, IntentNode], field_key: str, field_value: Any) -> Tuple[Any, bool]:
         if not isinstance(field_value, str):
             return field_value, False
