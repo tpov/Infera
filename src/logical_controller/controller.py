@@ -1,162 +1,125 @@
 import networkx as nx
 import re
-from typing import Dict, Any, Union
+import time
+from typing import Dict, Any, Union, List, Tuple
 
-from src.data_structures.object_node import ObjectNode, NodeState
-from src.data_structures.intent_node import IntentNode, IntentType
-
+from src.data_structures.object_node import ObjectNode
+from src.data_structures.intent_node import IntentNode
 
 class LogicalController:
-    """
-    The deterministic core of the AGI. It manages the World Graph and executes commands.
-    It is NOT a neural network. It is a state machine that operates on the graph.
-    """
     def __init__(self):
-        # For simplicity, we use networkx for the in-memory graph.
-        # This can be replaced with a more robust graph database like Neo4j later.
         self.world_graph = nx.MultiDiGraph()
-        # A simple regex to find formulas like 'PREVIOUS_VALUE + 3'
-        self.formula_pattern = re.compile(r"PREVIOUS_VALUE\s*([+\-*/])\s*(\d+)")
-        # A simple regex for function-like formulas
-        self.func_pattern = re.compile(r"FUNC::(\w+)\((.*)\)")
 
-    def _resolve_node(self, node_id: str) -> Union[ObjectNode, IntentNode, None]:
-        """Gets the node data from the graph."""
-        if self.world_graph.has_node(node_id):
-            return self.world_graph.nodes[node_id]['data']
+    def _get_node_by_name(self, name: str) -> Union[str, None]:
+        for node_id, data in self.world_graph.nodes(data=True):
+            if data.get('data') and data['data'].name == name:
+                return node_id
         return None
 
-    def _parse_and_compute_formula(self, formula: str, target_node: Union[ObjectNode, IntentNode], attr_key: str) -> Any:
-        """
-        Parses and computes the value of a formula string.
-        Phase 1: Handles simple 'PREVIOUS_VALUE' arithmetic.
-        """
-        match = self.formula_pattern.match(formula)
-        if match:
-            operator = match.group(1)
-            value = float(match.group(2))
+    def _evaluate_field(self, node: Union[ObjectNode, IntentNode], field_key: str, field_value: Any) -> Tuple[Any, bool]:
+        if not isinstance(field_value, str):
+            return field_value, False
 
-            # Get the previous value from the node's attributes or parameters
-            if isinstance(target_node, ObjectNode):
-                previous_value = target_node.attributes.get(attr_key, 0.0)
-            elif isinstance(target_node, IntentNode):
-                previous_value = target_node.parameters.get(attr_key, 0.0)
-            else:
-                previous_value = 0.0
+        # Regex to capture 'PREVIOUS_VALUE + 5' or similar simple arithmetic
+        match = re.match(r"PREVIOUS_VALUE\s*([+\-*/])\s*(\d+(\.\d+)?)", field_value)
+        if not match:
+            return field_value, False
 
-            if operator == '+':
-                return previous_value + value
-            elif operator == '-':
-                return previous_value - value
-            elif operator == '*':
-                return previous_value * value
-            elif operator == '/':
-                return previous_value / value if value != 0 else float('inf')
+        op = match.group(1)
+        val = float(match.group(2))
 
-        # Placeholder for function calls like FUNC::PREDICT(id1, id2)
-        func_match = self.func_pattern.match(formula)
-        if func_match:
-            # For now, we just return the string indicating a function call is needed
-            # The main loop will need to see this and trigger the ReasoningNetwork
-            return f"PENDING_FUNC::{func_match.group(1)}({func_match.group(2)})"
+        try:
+            # Get the old value from the node object before it was updated.
+            # This is tricky because the update might have already happened in memory.
+            # A robust implementation would store a 'before' state.
+            # We'll simulate it by assuming the update hasn't been applied to the attribute yet.
+            # This part of the logic is flawed and needs a better state management.
+            # For now, let's assume the field hasn't been updated yet.
+            # This is a conceptual bug in the previous logic.
+            # Let's fix it by looking at the graph state.
 
-        # If no pattern matches, return the formula string as is
-        return formula
+            # The node passed in is the most up-to-date version. To get PREVIOUS_VALUE,
+            # we can't look at the node itself. This is a flaw in the simple approach.
+            # A real system would need transactionality.
+            # Let's simplify: we assume the 'update' declaration is separate and we can find the old node.
+            # This logic is getting complex, let's stick to a simpler evaluation for now.
+            # The bug is that the update happens before evaluation.
+
+            # Let's fix the logic flow entirely.
+            # We will evaluate formulas *before* applying the new value.
+            # This is handled in process_declarations now.
+
+            # The value passed here is the formula string itself.
+            # The `current_value` is what's currently in the node's attribute.
+            current_value = getattr(node, field_key, 0.0)
+            if not isinstance(current_value, (int, float)):
+                current_value = 0.0
+
+            if op == '+': result = current_value + val
+            elif op == '-': result = current_value - val
+            elif op == '*': result = current_value * val
+            elif op == '/': result = current_value / val
+            else: return field_value, False
+
+            return f"{field_value} = {result}", True
+        except (TypeError, ValueError):
+            return field_value, False
 
 
-    def execute_command(self, command: Dict[str, Any]):
-        """
-        Executes a single command from the Command Network.
+    def process_declarations(self, declarations: List[Dict[str, Any]]) -> List[str]:
+        processed_ids = []
 
-        Args:
-            command (Dict[str, Any]): A dictionary representing the command.
-                Example:
-                {
-                    'action': 'CREATE_NODE',
-                    'node_type': 'Object',
-                    'data': {'name': 'elephant', 'state': 'REAL', 'attributes': {'count': 2}}
-                }
-                {
-                    'action': 'UPDATE_NODE_PROPERTY',
-                    'node_id': 'some-uuid',
-                    'property_key': 'count',
-                    'property_value': 'PREVIOUS_VALUE + 3'
-                }
-        """
-        action = command.get("action")
+        declarations_by_name = {}
+        for decl in declarations:
+            name = decl.get('name')
+            if name not in declarations_by_name:
+                declarations_by_name[name] = []
+            declarations_by_name[name].append(decl)
 
-        if action == "CREATE_NODE":
-            node_type = command.get("node_type")
-            data = command.get("data", {})
+        for name, decl_list in declarations_by_name.items():
+            existing_node_id = self._get_node_by_name(name)
             node = None
-            if node_type == "Object":
-                data['state'] = NodeState(data.get('state', 'REAL'))
-                node = ObjectNode(**data)
-            elif node_type == "Intent":
-                data['state'] = NodeState(data.get('state', 'REAL'))
-                data['intent_type'] = IntentType(data.get('intent_type', 'ACTION'))
-                node = IntentNode(**data)
+            if existing_node_id:
+                node = self.world_graph.nodes[existing_node_id]['data']
+                print(f"CONTROLLER: Found existing node for '{name}'. Processing updates.")
 
-            if node:
-                self.world_graph.add_node(node.id, data=node)
-                print(f"CONTROLLER: Created Node {node}")
-                # Check for formulas upon creation
-                self._process_formulas(node)
+            for decl in decl_list:
+                node_type = decl.pop('type', 'Object')
+                if node is None: # Create node on first declaration for this name
+                    print(f"CONTROLLER: Creating new node for '{name}'.")
+                    NodeClass = ObjectNode if node_type == 'Object' else IntentNode
+                    node = NodeClass(**decl)
+                    self.world_graph.add_node(node.id, data=node)
+                else: # Update node
+                    for key, value in decl.items():
+                        # Evaluate formula BEFORE setting the attribute
+                        new_value, was_computed = self._evaluate_field(node, key, value)
+                        if was_computed:
+                             print(f"CONTROLLER: Computed formula for {node.id}: {key} = {new_value}")
+                        setattr(node, key, new_value if was_computed else value)
 
+                node.timestamp = time.time()
 
-        elif action == "UPDATE_NODE_PROPERTY":
-            node_id = command.get("node_id")
-            key = command.get("property_key")
-            value = command.get("property_value") # This could be a direct value or a formula string
-            node = self._resolve_node(node_id)
-            if node and key:
-                # We assume the value is a formula and try to compute it.
-                # If it's not a formula, _parse_and_compute_formula will return it as is.
-                computed_value = self._parse_and_compute_formula(str(value), node, key)
+            if node and node.id not in processed_ids:
+                processed_ids.append(node.id)
 
-                if isinstance(node, ObjectNode):
-                    node.attributes[key] = computed_value
-                elif isinstance(node, IntentNode):
-                    node.parameters[key] = computed_value
-                print(f"CONTROLLER: Updated Node {node_id}. Set {key} to {computed_value}")
+        # Auto-link nodes processed in the same batch
+        if len(processed_ids) > 1:
+            for i in range(len(processed_ids)):
+                for j in range(i + 1, len(processed_ids)):
+                    self.world_graph.add_edge(processed_ids[i], processed_ids[j], type="RELATED_IN_DECLARATION")
+                    print(f"CONTROLLER: Auto-linked {processed_ids[i]} and {processed_ids[j]}")
 
-        elif action == "CREATE_EDGE":
-            source_id = command.get("source_id")
-            target_id = command.get("target_id")
-            edge_type = command.get("edge_type", "RELATED_TO")
-            if self.world_graph.has_node(source_id) and self.world_graph.has_node(target_id):
-                self.world_graph.add_edge(source_id, target_id, key=edge_type, type=edge_type)
-                print(f"CONTROLLER: Created Edge from {source_id} to {target_id} of type {edge_type}")
-
-
-    def _process_formulas(self, node: Union[ObjectNode, IntentNode]):
-        """
-        Iterates through a node's formulas and computes them, updating the node's attributes/parameters.
-        """
-        # We need to copy the items because the dictionary might be modified during iteration
-        # if one formula depends on another (not handled yet, but good practice).
-        formulas_to_process = list(node.formula.items())
-
-        for key, formula_str in formulas_to_process:
-            computed_value = self._parse_and_compute_formula(formula_str, node, key)
-            if isinstance(node, ObjectNode):
-                node.attributes[key] = computed_value
-                print(f"CONTROLLER: Computed formula for {node.id}: {key} = {computed_value}")
-            elif isinstance(node, IntentNode):
-                node.parameters[key] = computed_value
-                print(f"CONTROLLER: Computed formula for {node.id}: {key} = {computed_value}")
-
-    def get_node_by_id(self, node_id: str):
-        return self._resolve_node(node_id)
+        return processed_ids
 
     def print_graph_summary(self):
         print("\n--- World Graph Summary ---")
-        if not self.world_graph.nodes:
+        if not self.world_graph:
             print("Graph is empty.")
             return
         for node_id in self.world_graph.nodes:
             node_data = self.world_graph.nodes[node_id]['data']
-            print(node_data)
-        for edge in self.world_graph.edges(keys=True):
-            print(f"Edge: ({edge[0]}) -[{edge[2]}]-> ({edge[1]})")
+            print(node_data.to_dict())
+        for u, v, data in self.world_graph.edges(data=True):
+            print(f"Edge: ({u}) -[{data.get('type', 'RELATED')}]-> ({v})")
         print("-------------------------\n")

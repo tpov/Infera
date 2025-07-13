@@ -3,78 +3,53 @@ from typing import Dict, Any, Union, List
 from enum import Enum
 
 class NodeState(Enum):
-    """
-    Defines the existence state of a node.
-    REAL: The node represents a confirmed, existing entity.
-    HYPOTHETICAL: The node is part of a simulation or a "what-if" scenario.
-    QUERY: The node represents a question about the world state, which needs to be resolved.
-    """
     REAL = "REAL"
     HYPOTHETICAL = "HYPOTHETICAL"
     QUERY = "QUERY"
 
+class PhysicalState(Enum):
+    SOLID = "SOLID"
+    LIQUID = "LIQUID"
+    GAS = "GAS"
+    UNKNOWN = "UNKNOWN"
+
 class ObjectNode:
     """
-    Represents an Object in the World Graph.
-    Objects are entities that have physical or conceptual embodiment.
+    Represents an Object in the World Graph. A declarative data structure.
+    All fields are optional and can be formulas (represented as strings).
     """
-    def __init__(self,
-                 name: str,
-                 state: NodeState,
-                 attributes: Dict[str, Any] = None,
-                 time: Union[float, Dict[str, float]] = 0.0,
-                 formula: Dict[str, str] = None,
-                 node_id: str = None):
-        """
-        Initializes an ObjectNode.
-
-        Args:
-            name (str): The name or type of the object (e.g., 'elephant', 'tree').
-            state (NodeState): The existence state of the node (REAL, HYPOTHETICAL, QUERY).
-            attributes (Dict[str, Any], optional): A dictionary of properties like color, size, position, count.
-                                                   The values can be direct or formulas. Defaults to {}.
-            time (Union[float, Dict[str, float]], optional): A timestamp or a time interval. Defaults to 0.0.
-            formula (Dict[str, str], optional): A dictionary where keys are attribute names and values are
-                                                the formulas to compute them (e.g., {'count': 'PREVIOUS_VALUE + 3'}).
-                                                Defaults to {}.
-            node_id (str, optional): A unique identifier. If not provided, a new UUID will be generated.
-        """
-        self.id: str = node_id if node_id else str(uuid.uuid4())
+    def __init__(self, **kwargs):
+        # --- Core Identification ---
+        self.id: str = kwargs.get('id', str(uuid.uuid4()))
         self.type: str = "Object"
-        self.name: str = name
-        self.state: NodeState = state
-        self.time: Union[float, Dict[str, float]] = time
+        self.name: str = kwargs.get('name', 'unknown_object')
+        self.owner_id: str = kwargs.get('owner_id')
 
-        # Attributes store the concrete values of the object's properties.
-        self.attributes: Dict[str, Any] = attributes if attributes else {}
+        # --- Spatio-Temporal and Contextual ---
+        self.timestamp: float = kwargs.get('timestamp')
+        self.duration: float = kwargs.get('duration')
+        self.context: NodeState = NodeState(kwargs.get('context', 'REAL'))
+        self.position: Dict[str, float] = kwargs.get('position') # {'x': 0, 'y': 0, 'z': 0}
 
-        # Formulas store the rules for how attributes can be calculated.
-        # The LogicalController will parse these and update the attributes dict.
-        self.formula: Dict[str, str] = formula if formula else {}
+        # --- Quantitative and Qualitative Attributes ---
+        self.count: Union[int, str] = kwargs.get('count', 1)
+        self.size: Dict[str, float] = kwargs.get('size') # {'length': 0, 'width': 0, 'height': 0}
+        self.weight: Union[float, str] = kwargs.get('weight')
+        self.color: str = kwargs.get('color')
+        self.physical_state: PhysicalState = PhysicalState(kwargs.get('physical_state', 'UNKNOWN'))
+
+        # --- Abstract Properties ---
+        self.description: str = kwargs.get('description')
+        self.probability: Union[float, str] = kwargs.get('probability', 1.0)
+        self.integrity: Union[float, str] = kwargs.get('integrity', 1.0)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Serializes the node object to a dictionary."""
-        return {
-            "id": self.id,
-            "type": self.type,
-            "name": self.name,
-            "state": self.state.value,
-            "time": self.time,
-            "attributes": self.attributes,
-            "formula": self.formula
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'ObjectNode':
-        """Creates an ObjectNode instance from a dictionary."""
-        return cls(
-            name=data['name'],
-            state=NodeState(data['state']),
-            attributes=data.get('attributes', {}),
-            time=data.get('time', 0.0),
-            formula=data.get('formula', {}),
-            node_id=data['id']
-        )
+        """Serializes the node to a dictionary, handling enums."""
+        data = self.__dict__.copy()
+        for key, value in data.items():
+            if isinstance(value, Enum):
+                data[key] = value.value
+        return data
 
     def __repr__(self) -> str:
-        return f"ObjectNode(id={self.id}, name='{self.name}', state={self.state.value}, attributes={self.attributes})"
+        return f"ObjectNode(id={self.id}, name='{self.name}', context={self.context.value})"

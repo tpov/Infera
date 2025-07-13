@@ -1,190 +1,97 @@
 import json
 import random
-from typing import List, Dict, Any, Tuple
-
-"""
-This module is responsible for generating training data for the CommandNetwork.
-The goal is to create pairs of (natural language text, corresponding command sequence).
-This is a foundational piece of the project and will need to be significantly
-expanded with a rich variety of templates and logic.
-"""
+from typing import List, Dict, Any
 
 class CommandNetworkDataGenerator:
-    """
-    Generates synthetic data for training the CommandNetwork.
-    """
     def __init__(self):
-        # In a real scenario, this would be a very large and complex structure.
-        self.templates = self._get_initial_templates()
-        self.entity_map = {
-            "стула": "стул", "яблока": "яблоко", "карандаша": "карандаш",
-            "слонам": "слон", "тигра": "тигр", "слонов": "слон"
+        self.templates: List[Dict[str, Any]] = self._get_templates()
+        self.placeholders: Dict[str, List[str]] = {
+            "<LOCATION>": ["комната", "коробка", "сад"],
+            "<COUNT_WORD>": ["два", "три", "пять"],
+            "<ENTITY>": ["стул", "яблоко", "слон"],
+            "<PERSON>": ["коллега", "начальник", "программист"],
+            "<TASK>": ["отчет", "презентация", "код"],
         }
-        self.count_map = {
-            "два": 2, "3": 3, "пять": 5, "двум": 2, "трех": 3
-        }
 
-
-    def _get_initial_templates(self) -> List[Dict[str, Any]]:
-        """
-        Defines the templates for data generation.
-        Each template contains:
-        - A sentence pattern with placeholders.
-        - The logic to generate the corresponding command sequence.
-        """
-        templates = [
-            {
-                "name": "Create single object with count",
-                "pattern": "в <LOCATION> есть <COUNT> <ENTITY_PLURAL>",
-                "placeholders": {
-                    "<LOCATION>": ["комнате", "коробке", "саду"],
-                    "<COUNT>": ["два", "3", "пять"],
-                    "<ENTITY_PLURAL>": ["стула", "яблока", "карандаша"]
-                },
-                "command_generator": self._generate_create_object_commands
-            },
-            {
-                "name": "Complex scenario: create, update, query",
-                "pattern": "К <INITIAL_COUNT_PHRASE> <ENTITY_A_PLURAL> добавили еще <COUNT_TO_ADD_PHRASE>, а потом <ENTITY_B_SINGULAR>. Что будет?",
-                "placeholders": {
-                    "<INITIAL_COUNT_PHRASE>": ["двум", "пяти"],
-                    "<ENTITY_A_PLURAL>": ["слонам"],
-                    "<COUNT_TO_ADD_PHRASE>": ["трех", "двух"],
-                    "<ENTITY_B_SINGULAR>": ["тигра"]
-                },
-                "command_generator": self._generate_complex_scenario_commands
-            },
-        ]
-        return templates
-
-    def _get_normalized_entity(self, text: str) -> str:
-        return self.entity_map.get(text, text)
-
-    def _get_normalized_count(self, text: str) -> int:
-        # Extend the map to include all cases from templates
-        full_count_map = {
-            "два": 2, "3": 3, "пять": 5, "двум": 2, "трех": 3,
-            "двух": 2, "пяти": 5
-        }
-        return full_count_map.get(text, int(text) if text.isdigit() else 1)
-
-
-    def _generate_create_object_commands(self, filled: Dict[str, str]) -> List[Dict[str, Any]]:
-        """
-        Generates commands for a "create object" sentence.
-        """
-        count = self._get_normalized_count(filled["<COUNT>"])
-        entity_name = self._get_normalized_entity(filled["<ENTITY_PLURAL>"])
-        location = self._get_normalized_entity(filled["<LOCATION>"])
-
-        obj_id = f"{entity_name}_1"
-        loc_id = f"{location}_1"
-
+    def _get_templates(self) -> List[Dict[str, Any]]:
         return [
-            {"action": "CREATE_NODE", "node_type": "Object", "data": {"name": entity_name, "state": "REAL", "attributes": {"count": count}, "node_id": obj_id}},
-            {"action": "CREATE_NODE", "node_type": "Object", "data": {"name": location, "state": "REAL", "attributes": {}, "node_id": loc_id}},
-            {"action": "CREATE_EDGE", "source_id": obj_id, "target_id": loc_id, "edge_type": "LOCATED_IN"}
+            {"name": "Create object with count", "pattern": "в <LOCATION> есть <COUNT_WORD> <ENTITY>", "generator": self._generate_create_object_declarations},
+            {"name": "Complex scenario with update", "pattern": "у нас было <COUNT_WORD> <ENTITY>, потом добавили еще <COUNT_WORD>", "generator": self._generate_update_object_declarations},
+            {"name": "Intent with dependencies", "pattern": "<PERSON> делает <TASK>, чтобы <PERSON> мог сделать <TASK>", "generator": self._generate_intent_dependency_declarations},
         ]
 
-    def _generate_complex_scenario_commands(self, filled: Dict[str, str]) -> List[Dict[str, Any]]:
-        """
-        Generates commands for the complex "elephants and tiger" scenario.
-        """
-        initial_count = self._get_normalized_count(filled["<INITIAL_COUNT_PHRASE>"])
-        entity_a_name = self._get_normalized_entity(filled["<ENTITY_A_PLURAL>"])
-        count_to_add = self._get_normalized_count(filled["<COUNT_TO_ADD_PHRASE>"])
-        entity_b_name = self._get_normalized_entity(filled["<ENTITY_B_SINGULAR>"])
+    def _get_placeholders_for_template(self, template: Dict[str, Any]) -> Dict[str, str]:
+        """Helper to get a random set of placeholders for a given template."""
+        filled = {}
+        pattern = template['pattern']
+        # This logic is simplified; it doesn't handle the same placeholder appearing twice yet.
+        for ph_key, ph_values in self.placeholders.items():
+            if ph_key in pattern:
+                filled[ph_key] = random.choice(ph_values)
+        return filled
 
-        entity_a_id = f"{entity_a_name}_1"
-        entity_b_id = f"{entity_b_name}_1"
-        query_id = "query_1"
-
+    def _generate_create_object_declarations(self, p: Dict[str, str]) -> List[Dict[str, Any]]:
+        count_map = {"два": 2, "три": 3, "пять": 5}
         return [
-            {
-                "action": "CREATE_NODE",
-                "node_type": "Object",
-                "data": {"name": entity_a_name, "state": "REAL", "attributes": {"count": initial_count}, "node_id": entity_a_id}
-            },
-            {
-                "action": "UPDATE_NODE_PROPERTY",
-                "node_id": entity_a_id,
-                "property_key": "count",
-                "property_value": f"PREVIOUS_VALUE + {count_to_add}"
-            },
-            {
-                "action": "CREATE_NODE",
-                "node_type": "Object",
-                "data": {"name": entity_b_name, "state": "HYPOTHETICAL", "attributes": {"count": 1}, "node_id": entity_b_id}
-            },
-            {
-               "action": "CREATE_EDGE",
-               "source_id": entity_b_id,
-               "target_id": entity_a_id,
-               "edge_type": "IN_SAME_SCENARIO_AS"
-            },
-            {
-               "action": "CREATE_NODE",
-               "node_type": "Object",
-               "data": {
-                   "name": "world_state_query",
-                   "state": "QUERY",
-                   "node_id": query_id,
-                   "formula": {'outcome': f'FUNC::PREDICT({entity_a_id}, {entity_b_id})'}
-               }
-           }
+            {"type": "Object", "name": p.get("<ENTITY>", "unknown"), "context": "REAL", "count": count_map.get(p.get("<COUNT_WORD>"), 1)},
+            {"type": "Object", "name": p.get("<LOCATION>", "unknown"), "context": "REAL"}
         ]
 
-    def generate_sample(self) -> Tuple[str, List[Dict[str, Any]]]:
-        """
-        Generates a single training sample (text, commands).
-        """
-        template = random.choice(self.templates)
+    def _generate_update_object_declarations(self, p: Dict[str, str]) -> List[Dict[str, Any]]:
+        count_map = {"два": 2, "три": 3, "пять": 5}
+        return [
+            {"type": "Object", "name": p.get("<ENTITY>"), "context": "REAL", "count": count_map.get(p.get("<COUNT_WORD>"))},
+            {"type": "Object", "name": p.get("<ENTITY>"), "context": "REAL", "count": f"PREVIOUS_VALUE + {count_map.get(p.get('<COUNT_WORD>_1', 'два'))}"}
+        ]
 
-        sentence = template["pattern"]
-        filled_placeholders = {}
+    def _generate_intent_dependency_declarations(self, p: Dict[str, str]) -> List[Dict[str, Any]]:
+        task1_name = f"task_{p.get('<TASK>','t1')}"
+        task2_name = f"task_{p.get('<TASK>_1','t2')}"
+        return [
+            {"type": "Object", "name": p.get("<PERSON>"), "context": "REAL"},
+            {"type": "Object", "name": p.get("<PERSON>_1"), "context": "REAL"},
+            {"type": "Intent", "name": task1_name, "context": "REAL", "source_id": p.get("<PERSON>"), "status": "IN_PROGRESS"},
+            {"type": "Intent", "name": task2_name, "context": "REAL", "source_id": p.get("<PERSON>_1"), "status": "PENDING", "dependencies": [task1_name]}
+        ]
 
-        for placeholder, values in template["placeholders"].items():
-            chosen_value = random.choice(values)
-            sentence = sentence.replace(placeholder, chosen_value, 1)
-            filled_placeholders[placeholder] = chosen_value
+    def generate_sample(self, template_name: str) -> Dict[str, Any]:
+        template = next((t for t in self.templates if t["name"] == template_name), None)
+        if not template: return {"text": "", "declarations": []}
 
-        # The command generator method is called via the instance, so `self` is passed implicitly.
-        commands = template["command_generator"](filled_placeholders)
+        # This generation logic is still simplified for clarity.
+        placeholders = self._get_placeholders_for_template(template)
+        # Manually handle cases with multiple placeholders of the same type for now
+        if template_name == "Complex scenario with update":
+            placeholders["<COUNT_WORD>_1"] = random.choice(self.placeholders["<COUNT_WORD>"])
+        if template_name == "Intent with dependencies":
+             placeholders["<PERSON>_1"] = random.choice(self.placeholders["<PERSON>"])
+             placeholders["<TASK>_1"] = random.choice(self.placeholders["<TASK>"])
 
-        return sentence, commands
+        sentence = template['pattern']
+        for key, val in placeholders.items():
+            if key.endswith("_1"): continue
+            sentence = sentence.replace(key, val, 1)
+        # A bit of a hack for the second placeholder
+        if "_1" in str(placeholders):
+             sentence = sentence.replace(template['pattern'].split()[2], placeholders.get(next(k for k in placeholders if k.endswith("_1"))))
 
-    def generate_data(self, num_samples: int) -> List[Dict[str, Any]]:
-        """
-        Generates a list of training samples.
-        """
-        data = []
-        for _ in range(num_samples):
-            text, commands = self.generate_sample()
-            data.append({"text": text, "commands": commands})
-        return data
-
+        declarations = template["generator"](placeholders)
+        return {"text": "Simulated text for: " + template['name'], "declarations": declarations}
 
 if __name__ == '__main__':
     generator = CommandNetworkDataGenerator()
-    print("--- Generating Training Data for CommandNetwork ---")
+    print("--- Generating Declarative Training Data ---")
+    data = [generator.generate_sample(t['name']) for t in generator.templates]
 
-    # Generate more samples to see both templates in action
-    generated_data = generator.generate_data(10)
-
-    for i, sample in enumerate(generated_data):
+    for i, sample in enumerate(data):
         print(f"\n--- Sample {i+1} ---")
         print(f"Text: {sample['text']}")
-        print("Generated Commands:")
-        print(json.dumps(sample['commands'], indent=2, ensure_ascii=False))
+        print("Generated Declarations:", json.dumps(sample['declarations'], indent=2, ensure_ascii=False))
 
-    output_filename = "command_network_training_data.jsonl"
+    output_filename = "declarative_training_data.jsonl"
     print(f"\nSaving generated data to {output_filename}...")
-    try:
-        with open(output_filename, "w", encoding="utf-8") as f:
-            for item in generated_data:
-                f.write(json.dumps(item, ensure_ascii=False) + "\n")
-        print(f"Successfully saved {len(generated_data)} samples.")
-    except IOError as e:
-        print(f"Error saving file: {e}")
-
+    with open(output_filename, "w", encoding="utf-8") as f:
+        for item in data:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    print(f"Successfully saved {len(data)} samples.")
     print("\n--- Data Generation Finished ---")
