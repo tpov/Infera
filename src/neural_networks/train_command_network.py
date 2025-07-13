@@ -7,8 +7,6 @@ import os
 from typing import List, Dict, Any
 
 # --- 1. Serialization ---
-# We serialize the list of dictionaries directly into a JSON string.
-# This is the most robust way to represent the structured data for a seq2seq model.
 
 def serialize_declarations(declarations: List[Dict[str, Any]]) -> str:
     """Converts a list of declaration dictionaries into a compact JSON string."""
@@ -52,16 +50,21 @@ class DeclarativeNetworkDataset(Dataset):
 
 def train():
     MODEL_NAME = 't5-small'
-    DATA_PATH = 'declarative_training_data.jsonl' # Use the new data file
+    # Updated to use the new procedural data file
+    DATA_PATH = 'procedural_training_data.jsonl'
     OUTPUT_DIR = './models/declarative_command_network_t5'
 
     if not os.path.exists(DATA_PATH):
-        print(f"ERROR: Training data not found. Run the generator first.")
+        print(f"ERROR: Training data not found. Run `procedural_generator.py` first.")
         return
 
     tokenizer = T5Tokenizer.from_pretrained(MODEL_NAME)
     model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME)
     dataset = DeclarativeNetworkDataset(DATA_PATH, tokenizer)
+
+    if len(dataset) < 2:
+        print("ERROR: Not enough data to create a train/eval split. Need at least 2 samples.")
+        return
 
     train_size = int(0.9 * len(dataset))
     eval_size = len(dataset) - train_size
@@ -69,7 +72,7 @@ def train():
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=OUTPUT_DIR,
-        num_train_epochs=5, # Increased epochs for this complex task
+        num_train_epochs=5,
         per_device_train_batch_size=2,
         per_device_eval_batch_size=2,
         warmup_steps=10,
@@ -89,7 +92,6 @@ def train():
         labels[labels == -100] = tokenizer.pad_token_id
         decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
-        # We can still use exact match on the JSON string for a simple metric
         exact_matches = sum(1 for pred, label in zip(decoded_preds, decoded_labels) if pred.strip() == label.strip())
         return {"exact_match": exact_matches / len(decoded_preds)}
 
@@ -102,7 +104,7 @@ def train():
         compute_metrics=compute_metrics,
     )
 
-    print("Starting training on declarative data...")
+    print("Starting training on procedurally generated data...")
     trainer.train()
     print("Training finished.")
 
